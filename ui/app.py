@@ -2601,7 +2601,11 @@ def extract_business_context(user_input: str) -> Optional[dict]:
         )
         if response.status_code == 200:
             result = response.json()
-            logger.info(f"LLM extraction successful: {result.get('use_case')}, priorities: acc={result.get('accuracy_priority')}, cost={result.get('cost_priority')}, lat={result.get('latency_priority')}, comp={result.get('complexity_priority')}")
+            # Map preferred_gpu_type to hardware for UI compatibility
+            if 'preferred_gpu_type' in result:
+                gpu = result['preferred_gpu_type']
+                result['hardware'] = None if gpu == "Any GPU" else gpu
+            logger.info(f"LLM extraction successful: {result.get('use_case')}, hardware={result.get('hardware')}, priorities: acc={result.get('accuracy_priority')}, cost={result.get('cost_priority')}, lat={result.get('latency_priority')}, comp={result.get('complexity_priority')}")
             return result
         else:
             logger.warning(f"LLM extraction API returned status {response.status_code}: {response.text[:200]}")
@@ -2705,14 +2709,20 @@ def mock_extraction(user_input: str) -> dict:
             user_count = int(num)
             break
     
-    # Detect hardware
+    # Detect hardware preference
     hardware = None
-    if "h100" in text_lower:
+    if "h200" in text_lower:
+        hardware = "H200"
+    elif "h100" in text_lower:
         hardware = "H100"
     elif "a100" in text_lower:
         hardware = "A100"
+    elif "l4" in text_lower:
+        hardware = "L4"
     elif "l40" in text_lower:
         hardware = "L40S"
+    elif "b200" in text_lower:
+        hardware = "B200"
     
     # Detect priority from user input
     priority = "balanced"  # default

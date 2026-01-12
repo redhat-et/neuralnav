@@ -83,6 +83,12 @@ class DeploymentIntent(BaseModel):
         description="Domain requirements (general, code, multilingual, enterprise)",
     )
 
+    # Hardware preference extracted from natural language
+    preferred_gpu_type: str = Field(
+        default="Any GPU",
+        description="User's preferred GPU type if mentioned (e.g., H100, H200, A100, L4) or 'Any GPU' if not specified"
+    )
+
     # Priority hints extracted from natural language (used for weight calculation)
     accuracy_priority: Literal["low", "medium", "high"] = Field(
         default="medium", description="Accuracy/quality importance"

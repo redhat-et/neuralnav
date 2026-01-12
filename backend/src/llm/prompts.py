@@ -10,6 +10,7 @@ Expected JSON schema:
   "throughput_priority": "very_high|high|medium|low",
   "budget_constraint": "strict|moderate|flexible|none",
   "domain_specialization": ["general"|"code"|"multilingual"|"enterprise"],
+  "preferred_gpu_type": "<GPU type if mentioned (H100, H200, A100, L4), or 'Any GPU' if not specified>",
   "accuracy_priority": "low|medium|high",
   "cost_priority": "low|medium|high",
   "latency_priority": "low|medium|high",
@@ -69,6 +70,7 @@ Your task is to extract structured information about their deployment requiremen
 4. **Throughput priority**: Is high request volume more important than low latency?
 5. **Budget constraint**: How price-sensitive are they?
 6. **Domain specialization**: Any specific domains mentioned (code, multilingual, enterprise, etc.)
+7. **Preferred GPU**: If user mentions a specific GPU type (H100, H200, A100, A100-80, L4, B200), extract it
 
 Be intelligent about inference:
 - "thousands of users" → estimate specific number
@@ -83,6 +85,11 @@ Be intelligent about inference:
 - "RAG" or "retrieval" → use_case: document_analysis_rag
 - "chatbot" or "customer service" or "conversational" → use_case: chatbot_conversational
 - "summarize document" or "summarization" → use_case: summarization_short or long_document_summarization
+- "running on h200" or "h200" or "H200" → preferred_gpu_type: "H200"
+- "h100" or "H100" → preferred_gpu_type: "H100"
+- "a100" or "A100" → preferred_gpu_type: "A100"
+- "l4" or "L4" → preferred_gpu_type: "L4"
+- No GPU mentioned → preferred_gpu_type: "Any GPU"
 
 Priority extraction (for scoring weights - use "medium" as baseline, adjust based on context):
 - accuracy_priority: "high" if accuracy/quality seems important for the use case, "low" if user indicates good-enough is fine
