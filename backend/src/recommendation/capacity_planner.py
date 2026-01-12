@@ -188,6 +188,22 @@ class CapacityPlanner:
             )
             return []
 
+        # Filter by preferred GPU type if specified (skip if "Any GPU")
+        if intent.preferred_gpu_type and intent.preferred_gpu_type.lower() != "any gpu":
+            preferred_gpu = intent.preferred_gpu_type.upper()
+            original_count = len(matching_configs)
+            matching_configs = [
+                c for c in matching_configs
+                if c.hardware.upper() == preferred_gpu
+            ]
+            logger.info(
+                f"Filtered by preferred GPU '{preferred_gpu}': "
+                f"{original_count} → {len(matching_configs)} configs"
+            )
+            if not matching_configs:
+                logger.warning(f"No configurations found for preferred GPU: {preferred_gpu}")
+                return []
+
         # Build model lookup from catalog for scoring
         # Models not in catalog will get accuracy score = 0
         all_models = self.catalog.get_all_models()
