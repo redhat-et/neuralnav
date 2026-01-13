@@ -223,8 +223,6 @@ class CapacityPlanner:
             predicted_ttft = int(bench.ttft_p95) if bench.ttft_p95 else 0
             predicted_itl = int(bench.itl_p95) if bench.itl_p95 else 0
             predicted_e2e = int(bench.e2e_p95) if bench.e2e_p95 else 0
-            # Use tps_mean for throughput, fallback to tokens_per_second
-            throughput_tps = float(bench.tps_mean) if bench.tps_mean else (float(bench.tokens_per_second) if bench.tokens_per_second else 0)
 
             latency_score, slo_status = scorer.score_latency(
                 predicted_ttft_ms=predicted_ttft,
@@ -233,8 +231,8 @@ class CapacityPlanner:
                 target_ttft_ms=slo_targets.ttft_p95_target_ms,
                 target_itl_ms=slo_targets.itl_p95_target_ms,
                 target_e2e_ms=slo_targets.e2e_p95_target_ms,
-                throughput_tps=throughput_tps,
-                use_case=intent.use_case,  # Dynamic benchmarks per use case
+                use_case=intent.use_case,
+                near_miss_tolerance=near_miss_tolerance,
             )
 
             # Skip if exceeds SLO and we're not including near-miss

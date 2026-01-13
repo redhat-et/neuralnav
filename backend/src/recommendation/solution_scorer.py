@@ -2,17 +2,21 @@
 
 Scores deployment configurations on 4 criteria (0-100 scale):
 - Accuracy/Quality: Model capability (from Artificial Analysis benchmarks or param count fallback)
-- Price: Cost efficiency (inverse of cost, normalized)  
-- Latency: SLO compliance and headroom (from Andre's PostgreSQL benchmarks)
+- Price: Cost efficiency (inverse of cost, normalized)
+- Latency: SLO compliance with capped scoring (from Andre's PostgreSQL benchmarks)
 - Complexity: Deployment simplicity (fewer GPUs = simpler)
 
 INTEGRATION NOTE:
 - Quality scoring: Uses Yuval's weighted_scores CSVs (Artificial Analysis benchmarks)
 - Latency/Price/Complexity: Uses Andre's scoring logic and benchmark data
+- Latency scoring uses min/max ranges from usecase_slo_workload.json to cap scoring
+  (no extra credit for latencies below the "min" threshold)
 """
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -67,7 +71,72 @@ class SolutionScorer:
         "complexity": 0.10,
     }
 
-    def score_accuracy(self, model_size_str: str, model_name: Optional[str] = None, 
+    def __init__(self):
+        """Initialize the SolutionScorer with SLO range data."""
+        self.slo_ranges = self._load_slo_ranges()
+
+    def _load_slo_ranges(self) -> dict:
+        """
+        Load use-case SLO min/max ranges from usecase_slo_workload.json.
+
+        These ranges define "excellent" (min) to "acceptable" (max) latency targets.
+        Latencies at or below "min" receive the same maximum score (no extra credit).
+
+        Returns:
+            Dict mapping use_case to SLO target ranges
+        """
+        # Path is: backend/src/recommendation/solution_scorer.py
+        # Need to go up 4 levels to get to project root, then into data/
+        config_path = (
+            Path(__file__).parent.parent.parent.parent
+            / "data"
+            / "business_context"
+            / "use_case"
+            / "configs"
+            / "usecase_slo_workload.json"
+        )
+        try:
+            with open(config_path) as f:
+                data = json.load(f)
+            logger.debug(f"Loaded SLO ranges from {config_path}")
+            return data.get("use_case_slo_workload", {})
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load SLO ranges from {config_path}: {e}")
+            return {}
+
+    def _calculate_capped_latency_score(
+        self, actual_ms: float, min_ms: float, max_ms: float
+    ) -> float:
+        """
+        Score latency with ceiling at "min" threshold.
+
+        This implements a capped scoring approach where:
+        - At or below min_ms: 100 (no extra credit for going lower)
+        - Between min_ms and max_ms: linear interpolation 100→60
+        - Above max_ms: penalty zone with scores below 60
+
+        Args:
+            actual_ms: Actual latency in milliseconds
+            min_ms: "Excellent" threshold - latencies at or below get max score
+            max_ms: "Acceptable" threshold - latencies at this point get score of 60
+
+        Returns:
+            Score 0-100
+        """
+        if actual_ms <= min_ms:
+            # Capped at 100 - no extra credit for going below min
+            return 100.0
+        elif actual_ms <= max_ms:
+            # Linear interpolation from 100 (at min) to 60 (at max)
+            ratio = (actual_ms - min_ms) / (max_ms - min_ms)
+            return 100 - (ratio * 40)
+        else:
+            # Above max - penalty zone
+            # Score drops linearly, reaching 0 at 2x max
+            overage_ratio = actual_ms / max_ms
+            return max(0, 60 - (overage_ratio - 1) * 60)
+
+    def score_accuracy(self, model_size_str: str, model_name: Optional[str] = None,
                         use_case: Optional[str] = None) -> int:
         """
         Score model accuracy/quality.
@@ -168,77 +237,6 @@ class SolutionScorer:
         )
         return score
 
-    # Dynamic benchmark thresholds per use case (from slo_ranges.json real_data)
-    # Format: {use_case: {metric: {excellent: p50, good: p90, acceptable: max/2, max: max}}}
-    LATENCY_BENCHMARKS_BY_USE_CASE = {
-        # 512/256 token configs - fast interactive use cases
-        'chatbot_conversational': {
-            'ttft': {'excellent': 127, 'good': 384, 'acceptable': 3000, 'max': 11720},
-            'itl': {'excellent': 21, 'good': 122, 'acceptable': 150, 'max': 171},
-            'e2e': {'excellent': 6338, 'good': 39886, 'acceptable': 50000, 'max': 54632},
-            'tps': {'excellent': 5000, 'good': 2000, 'acceptable': 500, 'min': 50},
-        },
-        'code_completion': {
-            'ttft': {'excellent': 127, 'good': 384, 'acceptable': 3000, 'max': 11720},
-            'itl': {'excellent': 21, 'good': 122, 'acceptable': 150, 'max': 171},
-            'e2e': {'excellent': 6338, 'good': 39886, 'acceptable': 50000, 'max': 54632},
-            'tps': {'excellent': 5000, 'good': 2000, 'acceptable': 500, 'min': 50},
-        },
-        'translation': {
-            'ttft': {'excellent': 127, 'good': 384, 'acceptable': 3000, 'max': 11720},
-            'itl': {'excellent': 21, 'good': 122, 'acceptable': 150, 'max': 171},
-            'e2e': {'excellent': 6338, 'good': 39886, 'acceptable': 50000, 'max': 54632},
-            'tps': {'excellent': 5000, 'good': 2000, 'acceptable': 500, 'min': 50},
-        },
-        'content_creation': {
-            'ttft': {'excellent': 127, 'good': 384, 'acceptable': 3000, 'max': 11720},
-            'itl': {'excellent': 21, 'good': 122, 'acceptable': 150, 'max': 171},
-            'e2e': {'excellent': 6338, 'good': 39886, 'acceptable': 50000, 'max': 54632},
-            'tps': {'excellent': 5000, 'good': 2000, 'acceptable': 500, 'min': 50},
-        },
-        # 1024/1024 token config - medium
-        'code_generation_detailed': {
-            'ttft': {'excellent': 150, 'good': 500, 'acceptable': 700, 'max': 742},
-            'itl': {'excellent': 10, 'good': 40, 'acceptable': 55, 'max': 63},
-            'e2e': {'excellent': 12000, 'good': 45000, 'acceptable': 60000, 'max': 67323},
-            'tps': {'excellent': 3000, 'good': 1500, 'acceptable': 400, 'min': 50},
-        },
-        # 4096/512 token config - longer context
-        'summarization_short': {
-            'ttft': {'excellent': 200, 'good': 1000, 'acceptable': 50000, 'max': 200000},
-            'itl': {'excellent': 30, 'good': 100, 'acceptable': 150, 'max': 200},
-            'e2e': {'excellent': 15000, 'good': 100000, 'acceptable': 200000, 'max': 281786},
-            'tps': {'excellent': 2000, 'good': 1000, 'acceptable': 300, 'min': 30},
-        },
-        'document_analysis_rag': {
-            'ttft': {'excellent': 200, 'good': 1000, 'acceptable': 50000, 'max': 200000},
-            'itl': {'excellent': 30, 'good': 100, 'acceptable': 150, 'max': 200},
-            'e2e': {'excellent': 15000, 'good': 100000, 'acceptable': 200000, 'max': 281786},
-            'tps': {'excellent': 2000, 'good': 1000, 'acceptable': 300, 'min': 30},
-        },
-        # 10240/1536 token config - very long documents
-        'long_document_summarization': {
-            'ttft': {'excellent': 400, 'good': 800, 'acceptable': 1200, 'max': 1305},
-            'itl': {'excellent': 15, 'good': 35, 'acceptable': 45, 'max': 50},
-            'e2e': {'excellent': 25000, 'good': 100000, 'acceptable': 150000, 'max': 185299},
-            'tps': {'excellent': 1000, 'good': 500, 'acceptable': 200, 'min': 20},
-        },
-        'research_legal_analysis': {
-            'ttft': {'excellent': 400, 'good': 800, 'acceptable': 1200, 'max': 1305},
-            'itl': {'excellent': 15, 'good': 35, 'acceptable': 45, 'max': 50},
-            'e2e': {'excellent': 25000, 'good': 100000, 'acceptable': 150000, 'max': 185299},
-            'tps': {'excellent': 1000, 'good': 500, 'acceptable': 200, 'min': 20},
-        },
-    }
-    
-    # Default fallback for unknown use cases
-    LATENCY_BENCHMARKS_DEFAULT = {
-        'ttft': {'excellent': 100, 'good': 300, 'acceptable': 1000, 'max': 15000},
-        'itl': {'excellent': 15, 'good': 30, 'acceptable': 60, 'max': 200},
-        'e2e': {'excellent': 2000, 'good': 5000, 'acceptable': 15000, 'max': 60000},
-        'tps': {'excellent': 5000, 'good': 2000, 'acceptable': 500, 'min': 50},
-    }
-
     def score_latency(
         self,
         predicted_ttft_ms: int,
@@ -247,41 +245,37 @@ class SolutionScorer:
         target_ttft_ms: int,
         target_itl_ms: int,
         target_e2e_ms: int,
-        throughput_tps: float = 0,
         use_case: str = None,
+        near_miss_tolerance: float = 0.0,
     ) -> tuple[int, str]:
         """
-        Score latency using ABSOLUTE PERFORMANCE + SLO HEADROOM.
-        
-        Two-factor scoring approach (enterprise standard):
-        1. Absolute Performance (60%): How fast is the model compared to benchmarks?
-        2. SLO Headroom (40%): How much margin does it have vs the target?
-        
-        Benchmarks are DYNAMIC per use case - comparing a chatbot (512/256 tokens)
-        to a long doc summarization (10240/1536 tokens) uses different thresholds.
+        Score latency using CAPPED RANGE SCORING.
+
+        Uses min/max ranges from usecase_slo_workload.json to cap latency scoring:
+        - Latencies at or below "min" threshold get max score (100) - no extra credit
+        - Latencies between min and max get linearly interpolated scores (100→60)
+        - Latencies above max get penalty scores (<60)
+
+        This prevents the system from over-rewarding low latency configurations
+        that exceed user requirements.
 
         Args:
             predicted_ttft_ms: Predicted TTFT p95 in ms
             predicted_itl_ms: Predicted ITL p95 in ms
             predicted_e2e_ms: Predicted E2E p95 in ms
-            target_ttft_ms: Target TTFT p95 in ms
-            target_itl_ms: Target ITL p95 in ms
-            target_e2e_ms: Target E2E p95 in ms
-            throughput_tps: Optional throughput in tokens/second
-            use_case: Optional use case for dynamic benchmark selection
+            target_ttft_ms: Target TTFT p95 in ms (used for SLO compliance check)
+            target_itl_ms: Target ITL p95 in ms (used for SLO compliance check)
+            target_e2e_ms: Target E2E p95 in ms (used for SLO compliance check)
+            use_case: Use case for looking up SLO ranges
+            near_miss_tolerance: How much over SLO to consider "near_miss" vs "exceeds"
 
         Returns:
             Tuple of (score 0-100, slo_status)
             - slo_status: "compliant", "near_miss", or "exceeds"
         """
-        import math
-        
-        # Get use-case specific benchmarks (or default)
-        benchmarks = self.LATENCY_BENCHMARKS_BY_USE_CASE.get(
-            use_case, self.LATENCY_BENCHMARKS_DEFAULT
-        )
-        
-        # ===== STEP 1: Calculate SLO compliance ratios =====
+        # ===== STEP 1: Calculate SLO compliance status =====
+        # Configs are pre-filtered by find_configurations_meeting_slo(), but we still
+        # need to determine if each is compliant vs near-miss for scoring purposes
         ratios = []
         if target_ttft_ms > 0:
             ratios.append(predicted_ttft_ms / target_ttft_ms)
@@ -291,98 +285,88 @@ class SolutionScorer:
             ratios.append(predicted_e2e_ms / target_e2e_ms)
 
         if not ratios:
-            return 75, "compliant"
+            # All targets are zero - this is a configuration error
+            logger.error(
+                f"All SLO targets are zero (ttft={target_ttft_ms}, itl={target_itl_ms}, "
+                f"e2e={target_e2e_ms}). Cannot score latency."
+            )
+            return 0, "exceeds"
 
         worst_ratio = max(ratios)
-        
-        # Determine SLO status
+
+        # Determine SLO status using the tolerance passed from capacity_planner
         if worst_ratio <= 1.0:
             slo_status = "compliant"
-        elif worst_ratio <= 1.2:
+        elif worst_ratio <= (1.0 + near_miss_tolerance):
             slo_status = "near_miss"
         else:
-            slo_status = "exceeds"
-            # Return low score for non-compliant
-            score = max(0, int(30 - (worst_ratio - 1.0) * 20))
-            return score, slo_status
+            # This shouldn't happen if find_configurations_meeting_slo() is working correctly
+            logger.error(
+                f"Config exceeds SLO by {worst_ratio:.2f}x but passed database filter. "
+                f"This indicates a bug in find_configurations_meeting_slo()."
+            )
+            return 0, "exceeds"
 
-        # ===== STEP 2: Calculate ABSOLUTE performance score (60% weight) =====
-        # Uses USE-CASE SPECIFIC benchmark reference values
-        
-        def score_metric_lower_better(value: float, metric_benchmarks: dict) -> float:
-            """Score a metric where LOWER is better (TTFT, ITL, E2E)."""
-            if value <= metric_benchmarks['excellent']:
-                # Excellent: 85-100
-                return 100 - (value / metric_benchmarks['excellent']) * 15
-            elif value <= metric_benchmarks['good']:
-                # Good: 70-85
-                progress = (value - metric_benchmarks['excellent']) / (metric_benchmarks['good'] - metric_benchmarks['excellent'])
-                return 85 - progress * 15
-            elif value <= metric_benchmarks['acceptable']:
-                # Acceptable: 50-70
-                progress = (value - metric_benchmarks['good']) / (metric_benchmarks['acceptable'] - metric_benchmarks['good'])
-                return 70 - progress * 20
-            else:
-                # Below acceptable: 20-50
-                progress = min(1.0, (value - metric_benchmarks['acceptable']) / (metric_benchmarks['max'] - metric_benchmarks['acceptable']))
-                return 50 - progress * 30
+        # ===== STEP 2: Get SLO ranges for this use case =====
+        slo_range = self.slo_ranges.get(use_case, {}).get("slo_targets", {})
 
-        def score_metric_higher_better(value: float, metric_benchmarks: dict) -> float:
-            """Score a metric where HIGHER is better (TPS/throughput)."""
-            if value >= metric_benchmarks['excellent']:
-                # Excellent: 85-100
-                return 85 + min(15, (value - metric_benchmarks['excellent']) / metric_benchmarks['excellent'] * 15)
-            elif value >= metric_benchmarks['good']:
-                # Good: 70-85
-                progress = (value - metric_benchmarks['good']) / (metric_benchmarks['excellent'] - metric_benchmarks['good'])
-                return 70 + progress * 15
-            elif value >= metric_benchmarks['acceptable']:
-                # Acceptable: 50-70
-                progress = (value - metric_benchmarks['acceptable']) / (metric_benchmarks['good'] - metric_benchmarks['acceptable'])
-                return 50 + progress * 20
-            else:
-                # Below acceptable: 20-50
-                progress = max(0, (value - metric_benchmarks['min']) / (metric_benchmarks['acceptable'] - metric_benchmarks['min']))
-                return 20 + progress * 30
+        # If no SLO ranges available for this use case, all compliant configs get max score
+        # We don't use arbitrary defaults - that would defeat use-case-specific scoring
+        if not slo_range:
+            logger.warning(
+                f"No SLO ranges found for use_case='{use_case}'. "
+                f"All compliant configs will receive max latency score."
+            )
+            return 100, slo_status
 
-        ttft_score = score_metric_lower_better(predicted_ttft_ms, benchmarks['ttft'])
-        itl_score = score_metric_lower_better(predicted_itl_ms, benchmarks['itl'])
-        e2e_score = score_metric_lower_better(predicted_e2e_ms, benchmarks['e2e'])
-        
-        # Add throughput scoring if provided
-        if throughput_tps > 0:
-            tps_score = score_metric_higher_better(throughput_tps, benchmarks['tps'])
-            # Weight: TTFT 25%, ITL 25%, E2E 25%, TPS 25%
-            absolute_score = ttft_score * 0.25 + itl_score * 0.25 + e2e_score * 0.25 + tps_score * 0.25
-        else:
-            # No throughput - use original weights
-            # Weight: TTFT 35%, ITL 30%, E2E 35%
-            absolute_score = ttft_score * 0.35 + itl_score * 0.30 + e2e_score * 0.35
-            tps_score = 0
-        
-        # ===== STEP 3: Calculate HEADROOM score (40% weight) =====
-        # How much margin vs SLO target?
-        avg_ratio = sum(ratios) / len(ratios)
-        
-        # Convert ratio to score: ratio 0.1 → 100, ratio 1.0 → 50
-        headroom_score = 100 - (avg_ratio * 50)
-        headroom_score = max(50, min(100, headroom_score))
-        
-        # ===== STEP 4: Combine scores =====
-        # 60% absolute performance + 40% SLO headroom
-        final_score = absolute_score * 0.60 + headroom_score * 0.40
-        
-        # Near-miss penalty
-        if slo_status == "near_miss":
-            final_score = min(49, final_score * 0.7)
-        
-        score = int(max(20, min(100, final_score)))
+        # Get min/max ranges for each metric
+        ttft_range = slo_range.get("ttft_ms", {})
+        itl_range = slo_range.get("itl_ms", {})
+        e2e_range = slo_range.get("e2e_ms", {})
+
+        # Require both min and max for each metric
+        if not all([
+            ttft_range.get("min") and ttft_range.get("max"),
+            itl_range.get("min") and itl_range.get("max"),
+            e2e_range.get("min") and e2e_range.get("max"),
+        ]):
+            logger.warning(
+                f"Incomplete SLO ranges for use_case='{use_case}'. "
+                f"All compliant configs will receive max latency score."
+            )
+            return 100, slo_status
+
+        ttft_min, ttft_max = ttft_range["min"], ttft_range["max"]
+        itl_min, itl_max = itl_range["min"], itl_range["max"]
+        e2e_min, e2e_max = e2e_range["min"], e2e_range["max"]
+
+        # ===== STEP 3: Calculate CAPPED latency scores =====
+        # Each metric scored using the capped approach:
+        # - At or below min: 100 (no extra credit)
+        # - Between min and max: linear 100→60
+        # - Above max: penalty (<60)
+        ttft_score = self._calculate_capped_latency_score(
+            predicted_ttft_ms, ttft_min, ttft_max
+        )
+        itl_score = self._calculate_capped_latency_score(
+            predicted_itl_ms, itl_min, itl_max
+        )
+        e2e_score = self._calculate_capped_latency_score(
+            predicted_e2e_ms, e2e_min, e2e_max
+        )
+
+        # Weight: TTFT 34%, ITL 33%, E2E 33%
+        final_score = ttft_score * 0.34 + itl_score * 0.33 + e2e_score * 0.33
+
+        # Safety clamp in case weights are changed and don't sum to 1.0
+        score = int(max(0, min(100, final_score)))
 
         logger.debug(
             f"Latency score: {score} ({slo_status}) [use_case={use_case or 'default'}] - "
-            f"Absolute: {absolute_score:.0f} (TTFT={ttft_score:.0f}, ITL={itl_score:.0f}, E2E={e2e_score:.0f}, TPS={tps_score:.0f}), "
-            f"Headroom: {headroom_score:.0f}, "
-            f"Predicted: TTFT={predicted_ttft_ms}, ITL={predicted_itl_ms}, E2E={predicted_e2e_ms}, TPS={throughput_tps:.0f}"
+            f"Capped scores: TTFT={ttft_score:.0f} (vs {ttft_min}-{ttft_max}ms), "
+            f"ITL={itl_score:.0f} (vs {itl_min}-{itl_max}ms), "
+            f"E2E={e2e_score:.0f} (vs {e2e_min}-{e2e_max}ms), "
+            f"Predicted: TTFT={predicted_ttft_ms}, ITL={predicted_itl_ms}, E2E={predicted_e2e_ms}"
         )
         return score, slo_status
 
