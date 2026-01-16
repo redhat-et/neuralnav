@@ -12,9 +12,11 @@ Usage:
     streamlit run ui/poc_app.py
 """
 
+import io
 import json
 import logging
 import os
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -1556,6 +1558,15 @@ if "top5_cost" not in st.session_state:
     st.session_state.top5_cost = []
 if "top5_simplest" not in st.session_state:
     st.session_state.top5_simplest = []
+# Deployment tab state
+if "deployment_selected_config" not in st.session_state:
+    st.session_state.deployment_selected_config = None
+if "deployment_yaml_files" not in st.session_state:
+    st.session_state.deployment_yaml_files = {}
+if "deployment_id" not in st.session_state:
+    st.session_state.deployment_id = None
+if "deployment_yaml_generated" not in st.session_state:
+    st.session_state.deployment_yaml_generated = False
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -2479,6 +2490,166 @@ def render_hero():
     """, unsafe_allow_html=True)
 
 
+def render_deployment_tab():
+    """Tab 4: Deployment configuration and YAML generation."""
+    st.markdown('<h3 style="color: white; font-weight: 700;">Deployment Configuration</h3>', unsafe_allow_html=True)
+
+    # Check if a configuration is selected
+    selected_config = st.session_state.get("deployment_selected_config")
+
+    if not selected_config:
+        st.info("No configuration selected for deployment. Please select a configuration from the Recommendations tab.")
+        st.markdown("""
+        **How to select a configuration:**
+        1. Go to the **Recommendations** tab
+        2. Browse the available configurations
+        3. Click **Select for Deployment** on your preferred configuration
+        """)
+        return
+
+    # Display selected configuration summary
+    model_name = selected_config.get("model_name", "Unknown Model")
+    gpu_config = selected_config.get("gpu_config", {})
+    gpu_type = gpu_config.get("gpu_type", "Unknown")
+    gpu_count = gpu_config.get("gpu_count", 1)
+    replicas = gpu_config.get("replicas", 1)
+
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.05));
+                border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 12px; padding: 1rem; margin-bottom: 1.5rem;">
+        <div style="display: flex; align-items: center; gap: 2rem; flex-wrap: wrap;">
+            <div>
+                <span style="color: rgba(255,255,255,0.6); font-size: 0.85rem;">Model:</span>
+                <span style="color: white; font-weight: 600; font-size: 1rem; margin-left: 0.5rem;">{model_name}</span>
+            </div>
+            <div>
+                <span style="color: rgba(255,255,255,0.6); font-size: 0.85rem;">GPU:</span>
+                <span style="color: white; font-weight: 600; font-size: 1rem; margin-left: 0.5rem;">{gpu_count}x{gpu_type}</span>
+            </div>
+            <div>
+                <span style="color: rgba(255,255,255,0.6); font-size: 0.85rem;">Replicas:</span>
+                <span style="color: white; font-weight: 600; font-size: 1rem; margin-left: 0.5rem;">{replicas}</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # YAML Generation Section
+    if not st.session_state.get("deployment_yaml_generated"):
+        # YAML files not yet generated (edge case - shouldn't normally happen with auto-generation)
+        st.markdown('<h3 style="color: white; font-weight: 700;">Deployment Files</h3>', unsafe_allow_html=True)
+        st.warning("YAML files have not been generated yet.")
+
+        if st.button("Generate YAML Files", type="primary", key="generate_yaml_btn"):
+            with st.spinner("Generating deployment files..."):
+                try:
+                    # Call backend API to generate YAML files
+                    response = requests.post(
+                        f"{API_BASE_URL}/api/deploy",
+                        json={
+                            "recommendation": selected_config,
+                            "namespace": "default"
+                        },
+                        timeout=30
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+
+                    if result.get("success"):
+                        deployment_id = result.get("deployment_id")
+                        st.session_state.deployment_id = deployment_id
+
+                        # Fetch the actual YAML content
+                        yaml_response = requests.get(
+                            f"{API_BASE_URL}/api/deployments/{deployment_id}/yaml",
+                            timeout=10
+                        )
+                        yaml_response.raise_for_status()
+                        yaml_data = yaml_response.json()
+
+                        st.session_state.deployment_yaml_files = yaml_data.get("files", {})
+                        st.session_state.deployment_yaml_generated = True
+                        st.rerun()
+                    else:
+                        st.session_state.deployment_error = result.get('message', 'Unknown error')
+                        st.rerun()
+
+                except requests.exceptions.RequestException as e:
+                    st.session_state.deployment_error = f"Failed to connect to backend API: {e}"
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.deployment_error = f"Error generating YAML files: {e}"
+                    st.rerun()
+    else:
+        # Display generated YAML files
+        deployment_id = st.session_state.get("deployment_id", "unknown")
+        yaml_files = st.session_state.get("deployment_yaml_files", {})
+        deployment_error = st.session_state.get("deployment_error")
+
+        # Prepare zip file for download
+        zip_buffer = None
+        if yaml_files:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for filename, content in yaml_files.items():
+                    zf.writestr(filename, content)
+            zip_buffer.seek(0)
+
+        # Header with download icon and ID/error status
+        header_col1, header_col2 = st.columns([0.07, 0.93])
+        with header_col1:
+            if zip_buffer:
+                st.download_button(
+                    label="⬇",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"{deployment_id}.zip",
+                    mime="application/zip",
+                    key="download_all_yaml",
+                    help="Download all YAML files as zip"
+                )
+            else:
+                st.markdown("⬇", unsafe_allow_html=True)
+        with header_col2:
+            if deployment_error:
+                st.markdown(f'<h3 style="color: white; font-weight: 700; margin: 0;">Deployment Files <span style="color: #EE0000; font-weight: 700;">(ERROR!)</span></h3>', unsafe_allow_html=True)
+                st.error(deployment_error)
+            else:
+                st.markdown(f'<h3 style="color: white; font-weight: 700; margin: 0;">Deployment Files <span style="color: rgba(255,255,255,0.5); font-weight: 400; font-size: 0.8rem;">({deployment_id})</span></h3>', unsafe_allow_html=True)
+
+        if yaml_files:
+            # Sort files for consistent display order
+            file_order = ["inferenceservice", "autoscaling", "servicemonitor", "vllm-config"]
+            file_labels = {
+                "inferenceservice": "InferenceService (KServe)",
+                "autoscaling": "Autoscaling (HPA)",
+                "servicemonitor": "ServiceMonitor (Prometheus)",
+                "vllm-config": "vLLM Config (Reference)"
+            }
+
+            for file_key in file_order:
+                # Find matching file
+                matching_file = None
+                matching_content = None
+                for filename, content in yaml_files.items():
+                    if file_key in filename.lower():
+                        matching_file = filename
+                        matching_content = content
+                        break
+
+                if matching_content:
+                    label = file_labels.get(file_key, file_key)
+                    with st.expander(f"{label}", expanded=False):
+                        st.code(matching_content, language="yaml")
+
+        # Regenerate button
+        if st.button("Regenerate YAML Files", key="regenerate_yaml_btn"):
+            st.session_state.deployment_yaml_generated = False
+            st.session_state.deployment_yaml_files = {}
+            st.session_state.deployment_id = None
+            st.session_state.deployment_error = None
+            st.rerun()
+
+
 def render_about_section(models_df: pd.DataFrame):
     """Render About section at the bottom with expandable info."""
     st.markdown("""
@@ -3015,8 +3186,8 @@ def render_top5_table(recommendations: list, priority: str):
 </div>
 </div>'''
             st.markdown(card_html, unsafe_allow_html=True)
-            
-            # Small arrow buttons inside card footer area
+
+            # Small arrow buttons and Select for Deployment button
             btn_col1, btn_col2, btn_col3 = st.columns([1, 2, 1])
             with btn_col1:
                 if st.button("◀", key=f"prev_{category_key}", use_container_width=True):
@@ -3026,6 +3197,66 @@ def render_top5_table(recommendations: list, priority: str):
                     st.session_state.show_winner_dialog = False
                     # Use session state directly to get latest value
                     st.session_state[idx_key] = (st.session_state[idx_key] - 1) % total
+            with btn_col2:
+                # Check if THIS SPECIFIC CARD is selected (by category_key, not just model/GPU)
+                selected_category = st.session_state.get("deployment_selected_category")
+                is_selected = (selected_category == category_key)
+
+                if is_selected:
+                    # Show green "Selected" button with checkmark - clicking deselects
+                    if st.button("✓ Selected", key=f"selected_{category_key}", use_container_width=True,
+                                type="primary", help="Click to deselect this configuration"):
+                        # Clear the selection
+                        st.session_state.deployment_selected_config = None
+                        st.session_state.deployment_selected_category = None
+                        st.session_state.deployment_yaml_generated = False
+                        st.session_state.deployment_yaml_files = {}
+                        st.session_state.deployment_id = None
+                        st.session_state.deployment_error = None
+                        st.rerun()
+                else:
+                    # Show "Select" button - clicking selects
+                    if st.button("Select", key=f"select_{category_key}", use_container_width=True,
+                                help="Select this configuration for deployment"):
+                        # Store the current recommendation and which card it came from
+                        st.session_state.deployment_selected_config = rec
+                        st.session_state.deployment_selected_category = category_key
+                        st.session_state.deployment_yaml_generated = False
+                        st.session_state.deployment_yaml_files = {}
+                        st.session_state.deployment_id = None
+
+                        # Auto-generate YAML files
+                        try:
+                            response = requests.post(
+                                f"{API_BASE_URL}/api/deploy",
+                                json={
+                                    "recommendation": rec,
+                                    "namespace": "default"
+                                },
+                                timeout=30
+                            )
+                            response.raise_for_status()
+                            result = response.json()
+
+                            if result.get("success"):
+                                deployment_id = result.get("deployment_id")
+                                st.session_state.deployment_id = deployment_id
+
+                                # Fetch the actual YAML content
+                                yaml_response = requests.get(
+                                    f"{API_BASE_URL}/api/deployments/{deployment_id}/yaml",
+                                    timeout=10
+                                )
+                                yaml_response.raise_for_status()
+                                yaml_data = yaml_response.json()
+
+                                st.session_state.deployment_yaml_files = yaml_data.get("files", {})
+                                st.session_state.deployment_yaml_generated = True
+                            else:
+                                st.session_state.deployment_yaml_generated = False
+                        except Exception:
+                            st.session_state.deployment_yaml_generated = False
+                        st.rerun()
             with btn_col3:
                 if st.button("▶", key=f"next_{category_key}", use_container_width=True):
                     # IMPORTANT: Reset dialog states to prevent table from opening
@@ -4197,19 +4428,22 @@ def main():
     # Main Content - Compact hero
     render_hero()
     
-    # Tab-based navigation (4 tabs)
-    tab1, tab2, tab3, tab4 = st.tabs(["Define Use Case", "Technical Specification", "Recommendations", "About"])
-    
+    # Tab-based navigation (5 tabs)
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Define Use Case", "Technical Specification", "Recommendations", "Deployment", "About"])
+
     with tab1:
         render_use_case_input_tab(priority, models_df)
-    
+
     with tab2:
         render_technical_specs_tab(priority, models_df)
-    
+
     with tab3:
         render_results_tab(priority, models_df)
 
     with tab4:
+        render_deployment_tab()
+
+    with tab5:
         render_about_section(models_df)
 
     
